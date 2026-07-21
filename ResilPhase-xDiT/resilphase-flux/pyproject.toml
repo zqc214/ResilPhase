@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Resilphase-FLUX-xDiT"
+version = "0.1.0"
+description = "ResilPhase-FLUX acceleration patch for xDiT/xFuser FLUX inference"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "diffusers>=0.35.0",
+  "xfuser",
+  "transformers",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

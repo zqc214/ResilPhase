@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "Resilphase-DiT-Diffusers"
+version = "0.1.0"
+description = "ResilPhase-DiT acceleration patch for HuggingFace Diffusers DiT pipelines"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "torch",
+  "diffusers>=0.35.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
