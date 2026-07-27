@@ -119,36 +119,31 @@ def compute_stable_barycentric_weights(phase_nodes: list[float]) -> list[float]:
 def store_historical_cache(
     cache_dic: Dict,
     current: Dict,
-    img_delta_double: torch.Tensor,
-    txt_delta_double: torch.Tensor,
-    img_delta_single: torch.Tensor,
+    feature: torch.Tensor,
 ) -> None:
     if "historical_cache" not in cache_dic:
         cache_dic["historical_cache"] = {
             "steps": [],
-            "img_double": [],
-            "txt_double": [],
-            "img_single": [],
+            "features": [],
         }
 
     cache_dic["historical_cache"]["steps"].append(current["step"])
-    cache_dic["historical_cache"]["img_double"].append(img_delta_double.detach().clone())
-    cache_dic["historical_cache"]["txt_double"].append(txt_delta_double.detach().clone())
-    cache_dic["historical_cache"]["img_single"].append(img_delta_single.detach().clone())
+    cache_dic["historical_cache"]["features"].append(feature.detach().clone())
 
     max_cache_size = cache_dic["max_order"] + 1
     if len(cache_dic["historical_cache"]["steps"]) > max_cache_size:
-        for key in ("steps", "img_double", "txt_double", "img_single"):
+        for key in ("steps", "features"):
             cache_dic["historical_cache"][key] = cache_dic["historical_cache"][key][-max_cache_size:]
 
 
 def get_historical_cache_for_prediction(cache_dic: Dict, current: Dict) -> tuple:
     historical_cache = cache_dic.get("historical_cache")
     if not historical_cache or "steps" not in historical_cache:
-        return [], [], [], []
+        return [], []
 
+    historical_steps = historical_cache["steps"]
     activated_steps = current["activated_steps"]
-    valid_indices = [index for index, step in enumerate(historical_cache["steps"]) if step in activated_steps]
+    valid_indices = [index for index, step in enumerate(historical_steps) if step in activated_steps]
 
     max_cache_size = cache_dic["max_order"] + 1
     if len(valid_indices) > max_cache_size:
@@ -156,48 +151,16 @@ def get_historical_cache_for_prediction(cache_dic: Dict, current: Dict) -> tuple
 
     return (
         [historical_cache["steps"][index] for index in valid_indices],
-        [historical_cache["img_double"][index] for index in valid_indices],
-        [historical_cache["txt_double"][index] for index in valid_indices],
-        [historical_cache["img_single"][index] for index in valid_indices],
+        [historical_cache["features"][index] for index in valid_indices],
     )
 
 
-def barycentric_lagrange_prediction_double(cache_dic: Dict, current: Dict) -> tuple[torch.Tensor, torch.Tensor]:
-    historical_steps, img_double_features, txt_double_features, _ = get_historical_cache_for_prediction(
-        cache_dic, current
-    )
+def barycentric_lagrange_prediction(cache_dic: Dict, current: Dict) -> torch.Tensor:
+    historical_steps, historical_features = get_historical_cache_for_prediction(cache_dic, current)
     if len(historical_steps) == 0:
-        raise RuntimeError("ResilPhase cache has no historical double-block features.")
+        raise RuntimeError("ResilPhase cache has no historical features.")
     if len(historical_steps) == 1:
-        return img_double_features[0], txt_double_features[0]
-
-    s_target = get_phase_mapping_from_cache(cache_dic, current["step"])
-    phase_nodes = cache_dic["phase_axis"]["phase_nodes"]
-    barycentric_weights = cache_dic["phase_axis"]["barycentric_weights"]
-
-    img_numerator = None
-    txt_numerator = None
-    denominator = 0.0
-
-    for j, (img_feature, txt_feature) in enumerate(zip(img_double_features, txt_double_features)):
-        denominator_j = s_target - phase_nodes[j]
-        if abs(denominator_j) < 1e-12:
-            return img_feature, txt_feature
-
-        lambda_j = barycentric_weights[j] / denominator_j
-        img_numerator = lambda_j * img_feature if img_numerator is None else img_numerator + lambda_j * img_feature
-        txt_numerator = lambda_j * txt_feature if txt_numerator is None else txt_numerator + lambda_j * txt_feature
-        denominator += lambda_j
-
-    return img_numerator / denominator, txt_numerator / denominator
-
-
-def barycentric_lagrange_prediction_single(cache_dic: Dict, current: Dict) -> torch.Tensor:
-    historical_steps, _, _, img_single_features = get_historical_cache_for_prediction(cache_dic, current)
-    if len(historical_steps) == 0:
-        raise RuntimeError("ResilPhase cache has no historical single-block features.")
-    if len(historical_steps) == 1:
-        return img_single_features[0]
+        return historical_features[0]
 
     s_target = get_phase_mapping_from_cache(cache_dic, current["step"])
     phase_nodes = cache_dic["phase_axis"]["phase_nodes"]
@@ -206,7 +169,7 @@ def barycentric_lagrange_prediction_single(cache_dic: Dict, current: Dict) -> to
     numerator = None
     denominator = 0.0
 
-    for j, feature in enumerate(img_single_features):
+    for j, feature in enumerate(historical_features):
         denominator_j = s_target - phase_nodes[j]
         if abs(denominator_j) < 1e-12:
             return feature
@@ -265,9 +228,7 @@ def update_phase_axis_cache(cache_dic: Dict, current: Dict) -> None:
 def update_lagrange_system_cache(
     cache_dic: Dict,
     current: Dict,
-    img_delta_double: torch.Tensor,
-    txt_delta_double: torch.Tensor,
-    img_delta_single: torch.Tensor,
+    feature: torch.Tensor,
 ) -> None:
-    store_historical_cache(cache_dic, current, img_delta_double, txt_delta_double, img_delta_single)
+    store_historical_cache(cache_dic, current, feature)
     update_phase_axis_cache(cache_dic, current)

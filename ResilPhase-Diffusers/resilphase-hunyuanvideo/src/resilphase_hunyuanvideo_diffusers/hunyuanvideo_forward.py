@@ -7,8 +7,7 @@ from diffusers.utils import USE_PEFT_BACKEND, logging, scale_lora_layers, unscal
 
 from .cache import init_cache
 from .interpolation import (
-    barycentric_lagrange_prediction_double,
-    barycentric_lagrange_prediction_single,
+    barycentric_lagrange_prediction,
     update_lagrange_system_cache,
 )
 from .scheduler import cal_type
@@ -112,6 +111,7 @@ def resilphase_hunyuanvideo_forward(
     if current["type"] == "full":
         hidden_input = hidden_states.clone()
         encoder_input = encoder_hidden_states.clone()
+        combined_input = torch.cat([hidden_input, encoder_input], dim=1)
 
         for block in self.transformer_blocks:
             hidden_states, encoder_hidden_states = _run_block(
@@ -125,11 +125,6 @@ def resilphase_hunyuanvideo_forward(
                 token_replace_emb,
                 first_frame_num_tokens,
             )
-
-        img_delta_double = hidden_states - hidden_input
-        txt_delta_double = encoder_hidden_states - encoder_input
-
-        single_input = torch.cat([hidden_states, encoder_hidden_states], dim=1)
 
         for block in self.single_transformer_blocks:
             hidden_states, encoder_hidden_states = _run_block(
@@ -145,25 +140,18 @@ def resilphase_hunyuanvideo_forward(
             )
 
         single_output = torch.cat([hidden_states, encoder_hidden_states], dim=1)
-        img_delta_single = single_output - single_input
 
         update_lagrange_system_cache(
             cache_dic=cache_dic,
             current=current,
-            img_delta_double=img_delta_double,
-            txt_delta_double=txt_delta_double,
-            img_delta_single=img_delta_single,
+            feature=single_output - combined_input,
         )
 
         hidden_states = single_output[:, :latent_sequence_length]
 
     elif current["type"] == "resilphase_cache":
-        img_delta_double_pred, txt_delta_double_pred = barycentric_lagrange_prediction_double(cache_dic, current)
-        hidden_states = hidden_states + img_delta_double_pred
-        encoder_hidden_states = encoder_hidden_states + txt_delta_double_pred
-
-        single_input = torch.cat([hidden_states, encoder_hidden_states], dim=1)
-        single_output = single_input + barycentric_lagrange_prediction_single(cache_dic, current)
+        combined_input = torch.cat([hidden_states, encoder_hidden_states], dim=1)
+        single_output = combined_input + barycentric_lagrange_prediction(cache_dic, current)
         hidden_states = single_output[:, :latent_sequence_length]
 
     else:

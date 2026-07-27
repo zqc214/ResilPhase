@@ -135,42 +135,32 @@ def compute_stable_barycentric_weights(phase_nodes: list) -> list:
     
     return weights
 
-def store_historical_cache(cache_dic: Dict, current: Dict, img_delta_double: torch.Tensor, txt_delta_double: torch.Tensor, img_delta_single: torch.Tensor):
+def store_historical_cache(cache_dic: Dict, current: Dict, feature: torch.Tensor):
     """
-    存储完整计算时间步的历史缓存 - 分别存储三种变化量
+    存储完整计算时间步的历史缓存 - 存储经过所有double/single blocks后的总变化量
     用于拉格朗日插值预测，存储个数最大为 max_order + 1
     
     :param cache_dic: Cache dictionary
     :param current: Current step information
-    :param img_delta_double: img经过double_blocks的变化量
-    :param txt_delta_double: txt经过double_blocks的变化量
-    :param img_delta_single: img经过single_blocks的变化量
+    :param feature: single-stream最终输出相对double-stream初始拼接输入的总变化量
     """
     if 'historical_cache' not in cache_dic:
         cache_dic['historical_cache'] = {
             'steps': [],
-            'img_double': [],
-            'txt_double': [],
-            'img_single': []
+            'features': []
         }
     
-    # 添加当前完整计算的结果（分别存储三种变化量）
+    # 添加当前完整计算的结果（总变化量）
     cache_dic['historical_cache']['steps'].append(current['step'])
-    cache_dic['historical_cache']['img_double'].append(img_delta_double.clone())
-    cache_dic['historical_cache']['txt_double'].append(txt_delta_double.clone())
-    cache_dic['historical_cache']['img_single'].append(img_delta_single.clone())
+    cache_dic['historical_cache']['features'].append(feature.clone())
     
     # 保持最多 max_order + 1 个历史缓存
     max_cache_size = cache_dic['max_order'] + 1
     if len(cache_dic['historical_cache']['steps']) > max_cache_size:
         cache_dic['historical_cache']['steps'] = \
             cache_dic['historical_cache']['steps'][-max_cache_size:]
-        cache_dic['historical_cache']['img_double'] = \
-            cache_dic['historical_cache']['img_double'][-max_cache_size:]
-        cache_dic['historical_cache']['txt_double'] = \
-            cache_dic['historical_cache']['txt_double'][-max_cache_size:]
-        cache_dic['historical_cache']['img_single'] = \
-            cache_dic['historical_cache']['img_single'][-max_cache_size:]
+        cache_dic['historical_cache']['features'] = \
+            cache_dic['historical_cache']['features'][-max_cache_size:]
 
 def get_historical_cache_for_prediction(cache_dic: Dict, current: Dict) -> tuple:
     """
@@ -179,18 +169,16 @@ def get_historical_cache_for_prediction(cache_dic: Dict, current: Dict) -> tuple
     
     :param cache_dic: Cache dictionary
     :param current: Current step information
-    :return: (historical_steps, img_double_features, txt_double_features, img_single_features) 用于插值的历史数据
+    :return: (historical_steps, historical_features) 用于插值的历史数据
     """
     if 'historical_cache' not in cache_dic:
-        return [], [], [], []
+        return [], []
     
     if 'steps' not in cache_dic['historical_cache']:
-        return [], [], [], []
+        return [], []
     
     historical_steps = cache_dic['historical_cache']['steps']
-    img_double_features = cache_dic['historical_cache']['img_double']
-    txt_double_features = cache_dic['historical_cache']['txt_double']
-    img_single_features = cache_dic['historical_cache']['img_single']
+    historical_features = cache_dic['historical_cache']['features']
     
     # 根据activated_steps筛选可用的历史缓存
     # 只使用在activated_steps中的历史数据
@@ -207,98 +195,25 @@ def get_historical_cache_for_prediction(cache_dic: Dict, current: Dict) -> tuple
         valid_indices = valid_indices[-max_cache_size:]
     
     filtered_steps = [historical_steps[i] for i in valid_indices]
-    filtered_img_double = [img_double_features[i] for i in valid_indices]
-    filtered_txt_double = [txt_double_features[i] for i in valid_indices]
-    filtered_img_single = [img_single_features[i] for i in valid_indices]
+    filtered_features = [historical_features[i] for i in valid_indices]
     
-    return filtered_steps, filtered_img_double, filtered_txt_double, filtered_img_single
+    return filtered_steps, filtered_features
 
-def barycentric_lagrange_prediction_double(cache_dic: Dict, current: Dict) -> tuple[torch.Tensor, torch.Tensor]:
+def barycentric_lagrange_prediction(cache_dic: Dict, current: Dict) -> torch.Tensor:
     """
-    使用重心形式的拉格朗日插值进行double模块预测 - 平衡映射版本
-    预测img和txt经过double_blocks的变化量
+    使用重心形式的拉格朗日插值预测经过所有double/single blocks后的总变化量
     
     :param cache_dic: Cache dictionary containing phase axis info and barycentric weights
     :param current: Current step information
-    :return: (predicted_img_delta, predicted_txt_delta) 预测的img和txt变化量
+    :return: predicted_delta 预测的combined token总变化量
     """
 
-    # print("here2")
-
     # 1. 获取历史缓存数据
-    historical_steps, img_double_features, txt_double_features, _ = get_historical_cache_for_prediction(cache_dic, current)
+    historical_steps, historical_features = get_historical_cache_for_prediction(cache_dic, current)
     
     # 如果只有一个历史点，直接返回该点的特征
     if len(historical_steps) == 1:
-        return img_double_features[0], txt_double_features[0]
-    
-    # 2. 获取当前时间步的相位轴映射 s_target（使用平衡映射）
-    s_target = get_phase_mapping_from_cache(cache_dic, current['step'])
-    
-    # 3. 获取历史时间步对应的相位节点和重心权
-    phase_nodes = cache_dic['phase_axis']['phase_nodes']
-    barycentric_weights = cache_dic['phase_axis']['barycentric_weights']
-    
-    # 4. 计算重心形式拉格朗日插值 - img变化量
-    img_numerator = None
-    img_denominator = 0.0
-    
-    # 5. 计算重心形式拉格朗日插值 - txt变化量
-    txt_numerator = None
-    txt_denominator = 0.0
-    
-    for j in range(len(img_double_features)):
-        s_j = phase_nodes[j]  # 第j个相位节点
-        w_j = barycentric_weights[j]  # 第j个重心权
-        img_F_j = img_double_features[j]  # 第j个历史img特征
-        txt_F_j = txt_double_features[j]  # 第j个历史txt特征
-        
-        # 计算 λ_j = w_j / (s_target - s_j)
-        denominator_j = s_target - s_j
-        
-        if abs(denominator_j) < 1e-12:
-            # 如果 s_target 与某个节点重合，直接返回该节点的特征
-            return img_F_j, txt_F_j
-        
-        lambda_j = w_j / denominator_j
-        
-        # 累加img分子和分母
-        if img_numerator is None:
-            img_numerator = lambda_j * img_F_j
-        else:
-            img_numerator += lambda_j * img_F_j
-        img_denominator += lambda_j
-        
-        # 累加txt分子和分母
-        if txt_numerator is None:
-            txt_numerator = lambda_j * txt_F_j
-        else:
-            txt_numerator += lambda_j * txt_F_j
-        txt_denominator += lambda_j
-    
-    # 6. 计算最终预测结果
-    img_predicted = img_numerator / img_denominator
-    txt_predicted = txt_numerator / txt_denominator
-    
-    return img_predicted, txt_predicted
-
-def barycentric_lagrange_prediction_single(cache_dic: Dict, current: Dict) -> torch.Tensor:
-    """
-    使用重心形式的拉格朗日插值进行single模块预测 - 平衡映射版本
-    预测img经过single_blocks的变化量
-    
-    :param cache_dic: Cache dictionary containing phase axis info and barycentric weights
-    :param current: Current step information
-    :return: predicted_img_delta 预测的img变化量
-    """
-    # print("here1")
-
-    # 1. 获取历史缓存数据
-    historical_steps, _, _, img_single_features = get_historical_cache_for_prediction(cache_dic, current)
-    
-    # 如果只有一个历史点，直接返回该点的特征
-    if len(historical_steps) == 1:
-        return img_single_features[0]
+        return historical_features[0]
     
     # 2. 获取当前时间步的相位轴映射 s_target（使用平衡映射）
     s_target = get_phase_mapping_from_cache(cache_dic, current['step'])
@@ -311,10 +226,10 @@ def barycentric_lagrange_prediction_single(cache_dic: Dict, current: Dict) -> to
     numerator = None
     denominator = 0.0
     
-    for j in range(len(img_single_features)):
+    for j in range(len(historical_features)):
         s_j = phase_nodes[j]  # 第j个相位节点
         w_j = barycentric_weights[j]  # 第j个重心权
-        F_j = img_single_features[j]  # 第j个历史特征
+        F_j = historical_features[j]  # 第j个历史特征
         
         # 计算 λ_j = w_j / (s_target - s_j)
         denominator_j = s_target - s_j
@@ -330,7 +245,6 @@ def barycentric_lagrange_prediction_single(cache_dic: Dict, current: Dict) -> to
             numerator = lambda_j * F_j
         else:
             numerator += lambda_j * F_j
-        
         denominator += lambda_j
     
     # 5. 计算最终预测结果
@@ -404,19 +318,17 @@ def update_phase_axis_cache(cache_dic: Dict, current: Dict):
     cache_dic['phase_axis']['barycentric_weights'] = barycentric_weights
     cache_dic['phase_axis']['step_to_node_mapping'] = step_to_node_mapping
 
-def update_lagrange_system_cache(cache_dic: Dict, current: Dict, img_delta_double: torch.Tensor, txt_delta_double: torch.Tensor, img_delta_single: torch.Tensor):
+def update_lagrange_system_cache(cache_dic: Dict, current: Dict, feature: torch.Tensor):
     """
     更新拉格朗日插值系统的完整缓存 - 平衡映射版本
     在完整计算时间步调用，同时更新相位轴、重心权和历史特征缓存
     
     :param cache_dic: Cache dictionary
     :param current: Current step information  
-    :param img_delta_double: img经过double_blocks的变化量
-    :param txt_delta_double: txt经过double_blocks的变化量
-    :param img_delta_single: img经过single_blocks的变化量
+    :param feature: single-stream最终输出相对double-stream初始拼接输入的总变化量
     """
     # 1. 存储历史缓存
-    store_historical_cache(cache_dic, current, img_delta_double, txt_delta_double, img_delta_single)
+    store_historical_cache(cache_dic, current, feature)
     
     # 2. 更新相位轴和重心权缓存（使用平衡映射）
     update_phase_axis_cache(cache_dic, current)
@@ -432,8 +344,5 @@ def lagrange_cache_init(cache_dic: Dict, current: Dict):
     if 'historical_cache' not in cache_dic:
         cache_dic['historical_cache'] = {
             'steps': [],
-            'img_double': [],
-            'txt_double': [],
-            'img_single': []
+            'features': []
         }
-

@@ -15,7 +15,7 @@ from flux.modules.layers import (
 )
 from flux.modules.lora import LinearLora, replace_linear_with_lora
 from flux.modules.cache_functions import cal_type
-from flux.resilphase_utils import update_lagrange_system_cache, barycentric_lagrange_prediction_double, barycentric_lagrange_prediction_single
+from flux.resilphase_utils import update_lagrange_system_cache, barycentric_lagrange_prediction
 
 @dataclass
 class FluxParams:
@@ -126,61 +126,27 @@ class Flux(nn.Module):
             # Store input states for delta calculation
             img_input = img.clone()
             txt_input = txt.clone()
+            combined_input = torch.cat((txt_input, img_input), 1)
 
             for block in self.double_blocks:
                 img, txt = block(img=img, txt=txt, vec=vec, pe=pe)
 
-            # Calculate delta changes for double_blocks
-            img_delta_double = img - img_input 
-            txt_delta_double = txt - txt_input
-            
-            # Store deltas in cache_dic
-            # if 'delta_changes' not in cache_dic:
-            #     cache_dic['delta_changes'] = {}
-            # cache_dic['delta_changes']['img_double_blocks'] = img_delta_double
-            # cache_dic['delta_changes']['txt_double_blocks'] = txt_delta_double
-
             img = torch.cat((txt, img), 1)
-            
-            # Store input state for single_blocks delta calculation
-            img_single_input = img.clone()
-
 
             for block in self.single_blocks:
                 img = block(img, vec=vec, pe=pe)
 
-
-            
-            # Calculate delta changes for single_blocks
-            img_delta_single = img - img_single_input
-
-
+            combined_delta = img - combined_input
             update_lagrange_system_cache(
                 cache_dic=cache_dic,
                 current=current,
-                img_delta_double=img_delta_double,
-                txt_delta_double=txt_delta_double,
-                img_delta_single=img_delta_single,
+                feature=combined_delta,
             )
 
 
         elif current['type'] == 'resilphase_cache':
-            # 使用拉格朗日重心插值预测double模块的变化量
-            img_delta_double_pred, txt_delta_double_pred = barycentric_lagrange_prediction_double(cache_dic, current)
-            
-            # 应用预测的变化量到img和txt
-            img = img + img_delta_double_pred
-            txt = txt + txt_delta_double_pred
-
-            # 合并img和txt用于single模块处理
-            img_single_input = torch.cat((txt, img), 1)
-            
-            # 使用拉格朗日重心插值预测single模块的变化量
-            img_delta_single_pred = barycentric_lagrange_prediction_single(cache_dic, current)
-
-
-            # 应用预测的变化量到合并后的img
-            img = img_single_input + img_delta_single_pred
+            combined_input = torch.cat((txt, img), 1)
+            img = combined_input + barycentric_lagrange_prediction(cache_dic, current)
         
         img = img[:, txt.shape[1] :, ...]
 

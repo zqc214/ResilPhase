@@ -17,7 +17,7 @@ from .mlp_layers import MLP, MLPEmbedder, FinalLayer
 from .modulate_layers import ModulateDiT, modulate, apply_gate
 from .token_refiner import SingleTokenRefiner
 from .cache_functions import cal_type, force_init, cache_cutfresh, update_cache
-from .resilphase_utils import lagrange_cache_init, update_lagrange_system_cache, barycentric_lagrange_prediction_double, barycentric_lagrange_prediction_single
+from .resilphase_utils import lagrange_cache_init, update_lagrange_system_cache, barycentric_lagrange_prediction
 
 class MMDoubleStreamBlock(nn.Module):
     """
@@ -726,6 +726,7 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                 # Store input states for delta calculation
                 img_input = img.clone()
                 txt_input = txt.clone()
+                combined_input = torch.cat((img_input, txt_input), 1)
 
 
                 for i, block in enumerate(self.double_blocks):
@@ -744,16 +745,8 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
 
                     img, txt = block(*double_block_args)
 
-                # Calculate delta changes for double_blocks
-                img_delta_double = img - img_input 
-                txt_delta_double = txt - txt_input
-
                 # Merge txt and img to pass through single stream blocks.
                 x = torch.cat((img, txt), 1)
-                
-                # Store input state for single_blocks delta calculation
-                x_single_input = x.clone()
-
 
                 if len(self.single_blocks) > 0:
                     for i, block in enumerate(self.single_blocks):
@@ -771,36 +764,17 @@ class HYVideoDiffusionTransformer(ModelMixin, ConfigMixin):
                         ]
 
                         x = block(*single_block_args)
-                
-                # Calculate delta changes for single_blocks
-                x_delta_single = x - x_single_input
 
                 # Update lagrange system cache with calculated deltas
                 update_lagrange_system_cache(
                     cache_dic=cache_dic,
                     current=current,
-                    img_delta_double=img_delta_double,
-                    txt_delta_double=txt_delta_double,
-                    img_delta_single=x_delta_single,
+                    feature=x - combined_input,
                 )
 
             elif current['type'] == 'resilphase_cache':
-                # print("here1")
-                # 使用拉格朗日重心插值预测double模块的变化量
-                img_delta_double_pred, txt_delta_double_pred = barycentric_lagrange_prediction_double(cache_dic, current)
-                
-                # 应用预测的变化量到img和txt
-                img = img + img_delta_double_pred
-                txt = txt + txt_delta_double_pred
-
-                # 合并img和txt用于single模块处理
-                x_single_input = torch.cat((img, txt), 1)
-                
-                # 使用拉格朗日重心插值预测single模块的变化量
-                x_delta_single_pred = barycentric_lagrange_prediction_single(cache_dic, current)
-
-                # 应用预测的变化量到合并后的x
-                x = x_single_input + x_delta_single_pred
+                combined_input = torch.cat((img, txt), 1)
+                x = combined_input + barycentric_lagrange_prediction(cache_dic, current)
 
             # else:
             #     # print("here2")
